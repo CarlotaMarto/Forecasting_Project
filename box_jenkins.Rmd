@@ -1,0 +1,170 @@
+---
+title: "Box-Jenkins Methodology"
+author: "Carolina Vasconcelos"
+date:  "`r Sys.Date()`"
+output: rmdformats::readthedown
+---
+# Introduction
+
+The purpose of this notebook is to apply the Box-Jenkins Methodology as a tutorial/practical exercise. This is not an example of the project itself, you should read the evaluation criteria to ensure you address all the required points.
+
+```{r load, echo=FALSE, message=FALSE, warning=FALSE}
+library(fpp3)
+library(urca)
+library(kableExtra)
+
+japan_data <- aus_arrivals %>%
+  filter(Origin == "Japan")
+
+japan_data_train <- aus_arrivals %>%
+  filter(Origin == "Japan") %>% 
+  filter(year(Quarter) < 2011)
+```
+
+# Stabilize variance
+
+The first step is to visually assess the time series plot. Do we need to stabilize the variance?
+
+```{r var, echo=FALSE, message=FALSE, warning=FALSE}
+japan_data_train %>%
+  mutate(`log(Arrivals)` = log(Arrivals)) %>% 
+  select(-Origin) %>% 
+  pivot_longer(cols = -Quarter) %>% 
+  ggplot()+
+  geom_line(aes(x=Quarter, y=value)) +
+  facet_wrap(~ name, scales = 'free_y') +
+  theme_minimal() +
+  labs(y='')
+```
+
+# Stationarity
+
+The second step is to check for the presence of a unit root, using the GTS t-sig approach the results showed that it was necessary to take the seasonal and first differences.
+
+```{r stationarity, echo=FALSE, eval=FALSE, message=FALSE, warning=FALSE}
+summary(ur.df(japan_data_train$Arrivals,
+              type='drift', lags=10))
+
+japan_data_train %>%
+  autoplot(difference(Arrivals, 4))
+
+summary(ur.df(na.omit(difference(japan_data_train$Arrivals,4)),
+              type='drift', lags=10))
+
+japan_data_train %>%
+  autoplot(difference(Arrivals, 4) %>%  difference())
+
+japan_data_train <- japan_data_train %>% 
+              mutate(diff4_y = difference(Arrivals, 4),
+                     diff_y = difference(diff4_y))
+
+summary(ur.df(na.omit(japan_data_train$diff_y),
+              type='drift', lags=10))
+```
+
+```{r figure, echo=FALSE,  message=FALSE, warning=FALSE}
+japan_data_train %>%
+  autoplot(difference(Arrivals, 4) %>%  difference()) +
+  labs(y='')
+```
+
+
+# ACF and PACF plot - Identify model
+
+The third step is identify the SARIMA model orders through the assessment of the ACF and PACF. 
+
+```{r identify,  message=FALSE, warning=FALSE}
+japan_data_train %>% 
+  gg_tsdisplay(difference(Arrivals, 4) %>%  
+                 difference(), plot_type = 'partial')
+```
+
+# Estimate models
+
+The fourth step is to estimate the model and asssess the information criteria. Compare and comment.
+
+```{r estimation, echo=FALSE, message=FALSE, warning=FALSE}
+japan_data_train %>% 
+  model(
+    arima111011 = ARIMA(Arrivals ~ pdq(1,1,1) + PDQ(0,1,1)),
+    arima211011 = ARIMA(Arrivals ~ pdq(2,1,1) + PDQ(0,1,1)),
+    arima111111 = ARIMA(Arrivals ~ pdq(1,1,1) + PDQ(1,1,1)),
+    arima211111 = ARIMA(Arrivals ~ pdq(2,1,1) + PDQ(1,1,1)),
+    auto = ARIMA(Arrivals)
+  ) %>%
+  glance() %>% 
+  select(-c(ar_roots, ma_roots)) %>% 
+  kable()
+```
+
+# Diagnostic checks
+
+We assess the ACF and time series plot of the residuals:
+```{r residuals, echo=FALSE, message=FALSE, warning=FALSE}
+
+fit <- japan_data_train %>% 
+  model(
+    arima111011 = ARIMA(Arrivals ~ pdq(1,1,1) + PDQ(0,1,1)),
+    arima211011 = ARIMA(Arrivals ~ pdq(2,1,1) + PDQ(0,1,1)),
+    arima111111 = ARIMA(Arrivals ~ pdq(1,1,1) + PDQ(1,1,1)),
+    arima211111 = ARIMA(Arrivals ~ pdq(2,1,1) + PDQ(1,1,1)),
+    auto = ARIMA(Arrivals)
+  ) 
+
+fit %>%
+  select(arima111011) %>%
+  gg_tsresiduals()
+```
+
+And perform some statistical tests:
+```{r residuals_test, echo=FALSE, message=FALSE, warning=FALSE}
+res1 = augment(fit) %>% 
+        filter(.model == 'arima111011') %>% 
+        features(.innov, ljung_box, lag = 11, dof=3)
+
+res2 = augment(fit) %>% 
+        filter(.model == 'arima211011') %>% 
+        features(.innov, ljung_box, lag = 11, dof=4)
+
+res3= augment(fit) %>% 
+      filter(.model == 'arima111111') %>% 
+      features(.innov, ljung_box, lag = 11, dof=4)
+
+res4 = augment(fit) %>% 
+        filter(.model == 'arima211111') %>% 
+        features(.innov, ljung_box, lag = 11, dof=5)
+
+bind_rows(res1, res2, res3, res4) %>% 
+  kable()
+```
+
+
+# Check accuracy measures
+
+We will check the accuracy measures and select a model:
+
+```{r forecast, echo=FALSE, message=FALSE, warning=FALSE}
+
+fit %>%
+  forecast(h = 7) %>% 
+  accuracy(japan_data) %>% 
+  kable()
+```
+
+Then, we plot it!
+
+```{r forecastplot, message=FALSE, warning=FALSE}
+
+fit %>%
+  forecast(h = 7) %>% 
+  accuracy(japan_data) %>% 
+  kable()
+
+fit %>%
+  forecast(h = 7) %>% 
+  filter(.model == 'arima111011') %>% 
+  autoplot(japan_data) 
+
+```
+
+
