@@ -20,14 +20,6 @@ marriadges <- read.xlsx("pordata.xlsx")
 View(marriadges)
 ```
 
-#do not need to show all the output of the gts 
-#box-jenkings methodology:  
-#1.stabilize variance
-#2.check stationarity, 
-#3.YES stationary - ACF/PACF-define ARIMA/SARIMA ORDERS;NO- difference and repeat 2;
-#4.residuals and white noise? 
-#5.YES r e wn -Forecast and check accuracy measures;NO- repeat 3
-
 ## Including Plots
 
 You can also embed plots, for example:
