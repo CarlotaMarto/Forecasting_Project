@@ -29,7 +29,8 @@ The dataset is sourced from the Queensland Government Open Data portal ([Marriag
 The objective of this analysis is to identify trends and seasonal patterns in the number of marriages, fit a suitable SARIMA model, and produce reliable forecasts for the next 12 months.\
 These forecasts can provide insights for government planning, service provision, and understanding social trends related to marriage in Queensland.
 
-Session -> Set Working Directory as the directory where this file is currently in the computer.
+Session -\> Set Working Directory as the directory where this file is currently in the computer.
+
 ```{r load-data}
 # Define the correct path for the CSV file
 file_path <- "marriages_queensland/combined_file.csv"
@@ -59,12 +60,12 @@ data_ts %>%
   labs(title="Monthly Marriages Over Time", x="Date", y="Marriages") +
   theme_minimal()
 ```
+
 ```{r create train}
 data_train <- data_ts%>%
   filter(year(Date) <= 2020)
 data_train
 ```
-
 
 ```{r }
 data %>%
@@ -78,6 +79,7 @@ data %>%
 ```
 
 As the variance is not constant over time, we need to stabilize it. For that, we will use the Box-Cox transformation with the guerrero method for finding lambda.
+
 ```{r lambda}
 lambda <- data_train %>%
   features(Marriages, features = guerrero) %>%
@@ -85,16 +87,14 @@ lambda <- data_train %>%
 lambda
 ```
 
-
 ```{r applying box-cox transformation}
 data_train <- data_train %>%
   mutate(TransformedMarriages = box_cox(Marriages, lambda))
 
 ```
 
-
-
 # Stationarity
+
 ```{r}
 data_train %>%
   gg_tsdisplay(y = TransformedMarriages, plot_type = "partial") +
@@ -103,14 +103,12 @@ data_train %>%
 
 ```
 
-
 ```{r apply DF test}
 summary(ur.df(data_train$TransformedMarriages,type = "drift" ,lags = 16))
 
 ```
-As test-statistic (1.5748) does not belong to the critical region (tobs < -2.88), we fail to reject H0. There is statistical evidence of non-stationarity at 5% significance level. /
-We will apply a seasonal difference.
 
+As test-statistic (1.5748) does not belong to the critical region (tobs \< -2.88), we fail to reject H0. There is statistical evidence of non-stationarity at 5% significance level. / We will apply a seasonal difference.
 
 ```{r seasonal difference}
 
@@ -122,7 +120,8 @@ data_train %>%
 ```{r}
 summary(ur.df(na.omit(difference(data_train$TransformedMarriages, lag = 12)), type = "drift", lags = 1))
 ```
-As the test-statistic (-5.0029) belongs to the critical region (tobs < -2.88), we reject H0. There is statistical evidence of stationarity at 5% significance level.
+
+As the test-statistic (-5.0029) belongs to the critical region (tobs \< -2.88), we reject H0. There is statistical evidence of stationarity at 5% significance level.
 
 # Model identification
 
@@ -133,3 +132,57 @@ data_train %>%
 ```
 
 Possible models: SARIMA(1,0,3) (2,1,0)12, SARIMA(1,0,1) (0,1,0)12
+
+# Model Estimation
+
+```{r estimate-models}
+fit <- data_train %>%
+  model(
+    sarima103210 = ARIMA(TransformedMarriages ~ pdq(1,0,3) + PDQ(2,1,0)),
+    sarima101010 = ARIMA(TransformedMarriages ~ pdq(1,0,1) + PDQ(0,1,0)),
+    auto_arima = ARIMA(TransformedMarriages)
+  )
+
+fit %>%
+  glance() %>%
+  select(.model, sigma2, log_lik, AIC, AICc, BIC) %>%
+  arrange(AICc) %>%
+  kable(caption = "Comparison of SARIMA models")
+```
+
+The model with the lowest AICc is the automatic ARIMA model. Therefore, this model will be selected as the preferred model, provided that the residual diagnostics are satisfactory.
+
+# Diagnostic checks
+
+We assess the ACF and time series plot of the residuals for the selected model:
+
+```{r residuals, echo=FALSE, message=FALSE, warning=FALSE}
+fit %>%
+  dplyr::select(auto_arima) %>%
+  gg_tsresiduals()
+```
+
+And perform some statistical tests:
+
+```{r residuals_test, echo=FALSE, message=FALSE, warning=FALSE}
+res1 = augment(fit) %>% 
+        filter(.model == 'sarima103210') %>% 
+        features(.innov, ljung_box, lag = 24, dof = 6)
+
+res2 = augment(fit) %>% 
+        filter(.model == 'sarima101010') %>% 
+        features(.innov, ljung_box, lag = 24, dof = 2)
+
+res3 = augment(fit) %>% 
+        filter(.model == 'auto_arima') %>% 
+        features(.innov, ljung_box, lag = 24, dof = 3)
+
+bind_rows(res1, res2, res3) %>% 
+  kable()
+
+
+```
+
+Since all p-values are greater than 0.05, we fail to reject the null hypothesis of no autocorrelation in the residuals. Therefore, the residuals appear to behave like white noise.
+
+Among the estimated models, the automatic ARIMA model is preferred because it has the lowest AICc and also presents satisfactory residual diagnostics.
