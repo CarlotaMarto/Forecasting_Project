@@ -1,0 +1,259 @@
+---
+title: "Unveiling Vows: A Box-Jenkins SARIMA Approach to Modeling and Forecasting
+  Monthly Marriage Seasonality in Portugal"
+author: "Carlota Marto 20241729, Francisca Teixeira 20241702, Inês Caseiro 20241780"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(lubridate)
+library(forecast)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(tsibble)
+library(feasts)
+library(fable)
+library(knitr)
+library(urca)
+```
+
+## 1. Introduction
+
+This study implements the classic **Box-Jenkins methodology** to identify, estimate, validate, and forecast monthly marriage registrations in Portugal. Following the **Tidy Forecasting Workflow** outlined by Professor Bruno Damásio, the analysis adheres to a structured cycle: data preparation, visualization, model specification/estimation, visual and statistical diagnostic checking, and out-of-sample forecast generation.
+
+Sociodemographic time series typically display strong, non-stationary seasonal fluctuations. In Mediterranean countries like Portugal, monthly marriage frequencies are traditionally shaped by deep-rooted socio-cultural and religious calendars. Historical data shows distinct dips during the liturgical seasons of Lent (March) and Advent (December), paired with massive spikes during late summer vacation windows (August) (Afonso, 2000; Botão et al., 2016; Caleiro, 2010).
+
+The objective of this paper is to build an optimal Seasonal Autoregressive Integrated Moving Average (SARIMA) model. We use the training framework to stabilize variance, perform formal augmented Dickey-Fuller (ADF) unit root tests to verify stationarity, select candidate model dimensions via Information Criteria ($AICc$ and $BIC$), conduct residual independence tests ($Ljung-Box$), and ultimately assess true multi-step out-of-sample predictive performance against a designated validation test set.
+
+------------------------------------------------------------------------
+
+## 2. Data Preparation and Visual Exploration
+
+Following the tidy workflow, we first transform the raw input data into a clean `tsibble` object indexed by month.
+
+```{r load-data}
+# Step 1: Data Preparation
+file_path <- "marriages.csv"
+data <- read.csv(file_path)
+
+# Parse time index column into a standard tsibble yearmonth object
+data_ts <- data %>%
+  mutate(Date = yearmonth(Month)) %>%
+  arrange(Date) %>%
+  select(Date, Marriages) %>%
+  as_tsibble(index = Date)
+
+kable(head(data_ts, 10), caption = "Table 1: First 10 Rows of the Portuguese Marriage Time Series")
+```
+
+### 2.1 Visual Inspection
+
+```{r show-data-plot}
+# Step 2: Visualization
+data_ts %>%
+  autoplot(Marriages) +
+  labs(title = "Figure 1: Monthly Marriage Registrations in Portugal", 
+       x = "Timeline (Monthly Index)", 
+       y = "Registered Marriages") +
+  theme_minimal()
+```
+
+### 2.2 Preliminary Visual Analysis of the Original Series
+
+A preliminary visual inspection of the raw historical series (Figure 1) allows us to identify the foundational time-series components and structural patterns that will dictate our modeling strategy:
+
+1.  **Strong Seasonal Behavior:** The series exhibits a highly pronounced, regular, and repetitive cyclical pattern within each 12-month period. This strongly implies the need for a Seasonal ARIMA (SARIMA) specification rather than a standard ARIMA model.
+2.  **Changing Amplitude (Heteroscedasticity):** The vertical distance between the annual peaks and valleys is not constant, indicating that a variance-stabilizing transformation (such as Box-Cox) must be applied.
+3.  **Presence of Structural Shocks:** Around the year 2020, the series displays a sudden, severe drop corresponding to exogenous societal constraints and public health restrictions.
+
+### 2.3 Data Partitioning: Training vs. Test Sets
+
+```{r partitioning}
+data_train <- data_ts %>% filter(year(Date) <= 2020)
+data_test  <- data_ts %>% filter(year(Date) > 2020)
+```
+
+------------------------------------------------------------------------
+
+## 3. Variance Stabilization and Mathematical Transformation
+
+```{r compare-transformations}
+# Comparison between the original series and the log transformation
+data_train %>%
+  mutate(log_Marriages = log(Marriages)) %>%  
+  pivot_longer(
+    cols = c(Marriages, log_Marriages), 
+    names_to = "Transformation", 
+    values_to = "Value"
+  ) %>%  
+  ggplot(aes(x = Date, y = Value)) +  
+  geom_line(color = "darkblue") +
+  facet_wrap(~ Transformation, scales = "free_y", ncol = 1) +  
+  theme_minimal() +
+  labs(
+    title = "Figure 2: Preliminary Comparison of Scale Transformations",
+    y = "Number of Marriages / Log(Number of Marriages)", 
+    x = "Date"
+  )
+```
+
+An inspection of Figure 1 reveals that the amplitude of the annual seasonal fluctuations changes over time alongside changes in the overall level of the series, demonstrating heteroscedasticity. To stabilize this variance before conducting unit root testing, we implement a Box-Cox transformation. The optimal parameter ($\lambda$) is determined automatically via the Guerrero method.
+
+```{r lambda}
+lambda <- data_train %>%
+  features(Marriages, features = guerrero) %>%
+  pull(lambda_guerrero)
+lambda
+
+# IMPORTANT: Apply Box-Cox transformation HERE before any plots use TransformedMarriages
+data_train <- data_train %>%
+  mutate(TransformedMarriages = box_cox(Marriages, lambda))
+```
+
+### Interpretation of the Box-Cox Parameter
+
+Since our empirical $\lambda = -0.0373$ is slightly negative but effectively near zero, it confirms that the natural logarithmic transformation ($\lambda = 0$) is an excellent approximation for stabilizing the series' variance.
+
+------------------------------------------------------------------------
+
+## 4. Stationarity and Order of Integration (Identification Stage)
+
+The first step of the Box-Jenkins tentative identification stage requires taking differences until the series is stationary. We evaluate the integration properties using visual correlograms and formal statistical inference via Augmented Dickey-Fuller (ADF) tests.
+
+### 4.1 Unit Root Test on Levels
+
+```{r display-levels}
+data_train %>%
+  gg_tsdisplay(y = TransformedMarriages, plot_type = "partial") +
+  labs(title = "Figure 3: Core Correlograms (ACF/PACF) of Series in Levels")
+```
+
+```{r adf-levels}
+# Formal ADF test with a drift term
+summary(ur.df(data_train$TransformedMarriages, type = "drift", lags = 16))
+```
+
+**Statistical Inference:** The calculated test statistic ($t_{obs} = -0.1793$) does not fall into the empirical critical region, as it is greater than the 5% critical value of $-2.88$ ($t_{obs} > t_{crit}$). Therefore, we fail to reject the null hypothesis $H_0$ of a unit root.
+
+### 4.2 Seasonal Differencing ($D=1$)
+
+Given the prominent 12-month cyclical pattern shown in the ACF, we introduce a seasonal difference ($\Delta_{12}$) with a lag of 12.
+
+```{r seasonal-diff}
+data_train %>%
+  gg_tsdisplay(difference(TransformedMarriages, lag = 12), plot_type = "partial", lag_max = 36) +
+  labs(title = "Figure 4: Correlograms After Seasonal Differencing (Lag 12)")
+```
+
+### 4.3 Analysis of Seasonally Differenced Correlograms
+
+After applying a seasonal differencing operator ($\Delta_{12}$):
+
+1.  **Mean Stabilization:** The series now fluctuates around a stable, constant mean close to zero.
+2.  **Stationary ACF Decay:** The ACF plot shows a clear and rapid decay, confirming that a single seasonal difference ($D=1$) is sufficient.
+3.  **Tentative Parameter Identification:** The PACF shows a dominant spike at lag 1 suggesting $AR(1)$; the ACF has a spike at lag 12 suggesting $SMA(1)$.
+
+```{r adf-seasonal}
+# Formal ADF test on seasonally differenced data
+summary(ur.df(na.omit(difference(data_train$TransformedMarriages, lag = 12)), type = "drift", lags = 1))
+```
+
+**Statistical Inference:** After applying a single seasonal difference ($\Delta_{12}$), the calculated Augmented Dickey-Fuller test statistic drops to $t_{obs} = -4.4693$. We reject the null hypothesis $H_0$ of a unit root at the 5% significance level.
+
+------------------------------------------------------------------------
+
+## 5. Model Specification and Estimation
+
+Based on the patterns observed in Figure 4, we identify three candidate models:
+
+-   **Candidate Model 1:** $SARIMA(1,0,0)(0,1,1)_{12}$
+-   **Candidate Model 2:** $SARIMA(1,0,1)(0,1,1)_{12}$
+-   **Candidate Model 3:** `auto_arima` (Automated Benchmark)
+
+```{r estimate-models}
+# Model Estimation based on Figure 4 Identification
+fit <- data_train %>%
+  model(
+    sarima100011 = ARIMA(TransformedMarriages ~ pdq(1,0,0) + PDQ(0,1,1)),
+    sarima101011 = ARIMA(TransformedMarriages ~ pdq(1,0,1) + PDQ(0,1,1)),
+    auto_arima   = ARIMA(TransformedMarriages)
+  )
+
+# Extract and arrange goodness-of-fit statistics by AICc
+fit %>%
+  glance() %>%
+  select(.model, sigma2, log_lik, AIC, AICc, BIC) %>%
+  arrange(AICc) %>%
+  kable(caption = "Table 2: Goodness-of-Fit and Information Criteria Comparison")
+```
+
+### 5.1 Evaluation of Goodness-of-Fit and Information Criteria
+
+1.  **Information Criteria Dominance:** The automated specification (`auto_arima`) achieves the best performance, minimizing both $AICc = -27.9025$ and $BIC = -22.6525$.
+2.  **Goodness-of-Fit and Log-Likelihood:** Log-Likelihood values are remarkably close across models.
+3.  **Residual Variance (**$\sigma^2$): Minimized by `auto_arima` ($0.04374$).
+
+**Conclusion:** Based on the information criteria, `auto_arima` is selected as the champion model.
+
+------------------------------------------------------------------------
+
+## 6. Diagnostic Checking
+
+### 6.1 Residual Visual Examination
+
+```{r diagnostic-plots}
+# Diagnostic Checking for the chosen optimal model
+best_model_name <- fit %>% glance() %>% arrange(AICc) %>% slice(1) %>% pull(.model)
+
+fit %>%
+  select(!!sym(best_model_name)) %>%
+  gg_tsresiduals() +
+  labs(title = paste("Figure 5: Residual Diagnostics for", best_model_name))
+```
+
+
+Figure 5 presents the diagnostic plots for the `auto_arima` model residuals.
+
+**Top Panel (Residuals over time):** Residuals oscillate randomly around zero with constant variance (range: -2 to +2). No trend, seasonality, or volatility clustering is visible.
+
+**Middle Panel (Histogram):** The distribution is approximately symmetric around zero, with no severe outliers.
+
+**Bottom Panel (ACF):** No autocorrelation spikes exceed the 95% confidence interval at any lag (including seasonal lags 12 and 24).
+
+```{r residuals_test, echo=FALSE, message=FALSE, warning=FALSE}
+res1 <- augment(fit_arima) %>% 
+  filter(.model == 'auto_arima') %>% 
+  features(.innov, ljung_box, lag = 11, dof = 3)
+
+res2 <- augment(fit_arima) %>% 
+  filter(.model == 'sarima101010') %>%  
+  features(.innov, ljung_box, lag = 11, dof = 3)
+
+bind_rows(res1, res2) %>% 
+  kable(caption = 'Ljung-Box Test Results for Residuals')
+```
+
+------------------------------------------------------------------------
+
+## 7. Forecasting
+
+------------------------------------------------------------------------
+
+## 8. Conclusion
+
+------------------------------------------------------------------------
+
+## References
+
+-   Afonso, A. I. (2000). Grupo doméstico e mudança social. *Etnográfica*, (2), 153-182.
+-   Botão, M., Amorim, N., Santos, M., & Lopes, P. (2016). Variation in age at marriage in Portugal. *Revista de Demografia Histórica*, *34*(2), 129-159.
+-   Box, G. E., & Pierce, D. A. (1970). Distribution of residual autocorrelations. *Journal of the American Statistical Association*, *65*(332), 1509-1526.
+-   Caleiro, A. (2010). Forecasting the number of births in Portugal. *UNECE Demographic Papers*.
+-   Hyndman, R. J., & Koehler, A. B. (2006). Another look at measures of forecast accuracy. *International Journal of Forecasting*, *22*(4), 679-688.
+-   Ljung, G. M., & Box, G. E. (1978). On a measure of lack of fit in time series models. *Biometrika*, *65*(2), 297-303.
